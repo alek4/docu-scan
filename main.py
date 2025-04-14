@@ -1,7 +1,26 @@
+import datetime
 import cv2
 import numpy as np
 import time
 import sys
+
+from functools import partial
+import math
+
+def sort_clockwise(items, get_point=lambda x: x):
+    # Extract coordinates from each item using the get_point function
+    points = [get_point(item) for item in items]
+
+    # Calculate the centroid of the points
+    center = np.mean(points, axis=0)
+
+    # Function to calculate the angle between a point and the centroid
+    def calculate_angle(item):
+        point = get_point(item)
+        return math.atan2(point[1] - center[1], point[0] - center[0])
+
+    # Sort the items based on their angle with respect to the centroid
+    return sorted(items, key=calculate_angle)
 
 def create_binary_image(marker_grid, image_size=200):
     # Create a binary image from a grid
@@ -169,35 +188,79 @@ def main():
             center_x = int(M["m10"] / M["m00"])
             center_y = int(M["m01"] / M["m00"])
 
-            candidates_masks.append({"image": bin_marker, "center": (center_x, center_y)})
+            candidates_masks.append({"image": bin_marker, "center": (center_x, center_y), "contour": cand})
 
         matching_masks = []
         for cand in candidates_masks:
-          for mrk in binary_markers:
-            intersection = np.logical_and(mrk, cand["image"])
-            union = np.logical_or(mrk, cand["image"])
-            iou = np.sum(intersection) / np.sum(union)
+            max_iou = 0
+            best_match = None
 
-            # Check if the similarity is above the threshold
-            if iou > 0.5:
-              matching_masks.append(cand["center"])
+            # Find the marker with maximum IoU for this candidate
+            for mrk in binary_markers:
+                intersection = np.logical_and(mrk, cand["image"])
+                union = np.logical_or(mrk, cand["image"])
+                iou = np.sum(intersection) / np.sum(union)
 
+                # Update best match if this has higher IoU
+                if iou > max_iou:
+                    max_iou = iou
+                    best_match = cand
 
-        for m in matching_masks:
-          cv2.circle(frame, m, 5, (0, 0, 255), -1)
+            # Only add if we found a match with IoU above threshold
+            if max_iou > 0.5:
+                matching_masks.append({"cand": best_match, "iou": max_iou})
 
-        # ========= PERSPECTIVE TRANSFORM ========= #
+        matching_masks.sort(key=lambda e: e["iou"])
+        matching_masks = matching_masks[:4]
 
-        transformed_image = perspective_transform(frame, matching_masks)
+        # ===========CORNER DETECTION============== #
+
+        frame_corn = frame.copy()
+        if matching_masks:
+            matching_masks = [c["cand"] for c in matching_masks]
+            
+            centers = sort_clockwise(matching_masks, lambda x: x["center"])
+            corners = []
+            for i, c in enumerate(centers):
+                cv2.circle(frame_corn, c["center"], 5, (0, 0, 255), -1)
+
+                cnt = sort_clockwise([point[0] for point in c["contour"]])
+                cv2.circle(frame_corn, cnt[i], 5, (0, 255, 255), -1)
+                corners.append(cnt[i])
+
+        # ===========DOCUMENT DETECTION============== #
+
+        frame_doc = frame.copy()
+        if 'corners' in locals() and corners and len(corners) == 4:
+            num_points = len(corners)
+            for j in range(num_points):
+                # Connect each point to the next point (with wrap-around)
+                start_point = tuple(corners[j])
+                end_point = tuple(corners[(j + 1) % num_points])  # Modulo ensures wrapping around to the first point
+                cv2.line(frame_doc, start_point, end_point, (0, 255, 0), 2)  # Green line with thickness 2
+
+            warped = perspective_transform(frame, corners)
 
         # Display the resulting frame
         cv2.imshow('Camera', frame)
         cv2.imshow("Contours", frame_cont)
-        cv2.imshow("Document", transformed_image)
+        cv2.imshow("Corners", frame_corn)
+        cv2.imshow("Document", frame_doc)
+        if 'warped' in locals(): cv2.imshow("Warped", warped)
         
         # Press 'q' to exit
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+        # Press 'c' to capture document
+        if cv2.waitKey(1) & 0xFF == ord('c') and 'warped' in locals():
+            # Get current timestamp
+            current_time = datetime.datetime.now()
+            timestamp_str = current_time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+
+            # Create filename with timestamp
+            filename = f"captures/doc_{timestamp_str}.png"
+            cv2.imwrite(filename, warped, [cv2.IMWRITE_PNG_COMPRESSION, 9])
     
     # Add a newline after breaking out of the loop
     print()
